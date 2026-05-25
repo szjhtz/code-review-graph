@@ -297,7 +297,7 @@ class TestGraphPathResolution:
         (repo / ".git").mkdir()
         (repo / "src").mkdir()
         (repo / "src" / "app.py").write_text(
-            "def handle():\n    return 'ok'\n",
+            "def handle():\n    return 'ok'\n" + ("# padding\n" * 500),
             encoding="utf-8",
         )
         _seed_repo_relative_graph(repo)
@@ -310,6 +310,12 @@ class TestGraphPathResolution:
 
         changed = result["context"]["graph"]["changed_nodes"]
         assert any(n["name"] == "handle" for n in changed)
+        assert result["context_savings"]["estimated"] is True
+        assert set(result["context_savings"]) == {
+            "estimated",
+            "saved_tokens",
+            "saved_percent",
+        }
 
     def test_get_impact_radius_resolves_repo_relative_changed_file(self, tmp_path):
         repo = tmp_path / "fixtures" / "sample_repo"
@@ -950,6 +956,18 @@ class TestCommunityTools:
         assert "community pairs" in result["summary"]
         for c in result["communities"]:
             assert "members" not in c
+        assert result["context_savings"]["estimated"] is True
+        assert set(result["context_savings"]) == {
+            "estimated",
+            "saved_tokens",
+            "saved_percent",
+        }
+
+    def test_get_architecture_overview_standard_omits_savings_metadata(self):
+        result = get_architecture_overview_func(
+            repo_root=str(self.root), detail_level="standard"
+        )
+        assert "context_savings" not in result
 
     def test_get_architecture_overview_minimal_drops_members(self):
         result = get_architecture_overview_func(

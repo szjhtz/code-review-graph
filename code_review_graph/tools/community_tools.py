@@ -6,6 +6,7 @@ from collections import Counter
 from typing import Any
 
 from ..communities import get_architecture_overview, get_communities
+from ..context_savings import attach_context_savings
 from ..graph import node_to_dict
 from ..hints import generate_hints, get_session
 from ._common import _get_store
@@ -212,9 +213,10 @@ def get_architecture_overview_func(
     """
     store, root = _get_store(repo_root)
     try:
-        overview = get_architecture_overview(store)
+        full_overview = get_architecture_overview(store)
+        overview = full_overview
         if detail_level == "minimal":
-            overview = _minimal_overview(overview)
+            overview = _minimal_overview(full_overview)
         n_communities = len(overview["communities"])
         n_cross = len(overview["cross_community_edges"])
         n_warnings = len(overview["warnings"])
@@ -235,6 +237,8 @@ def get_architecture_overview_func(
         result["_hints"] = generate_hints(
             "get_architecture_overview", result, get_session()
         )
+        if detail_level == "minimal":
+            attach_context_savings(result, original_context=full_overview)
         return result
     except Exception as exc:
         return {"status": "error", "error": str(exc)}

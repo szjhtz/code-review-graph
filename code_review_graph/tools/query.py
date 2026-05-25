@@ -6,6 +6,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from ..context_savings import attach_context_savings, estimate_file_tokens
 from ..embeddings import EmbeddingStore
 from ..graph import _sanitize_name, edge_to_dict, node_to_dict
 from ..hints import generate_hints, get_session
@@ -73,6 +74,7 @@ def get_impact_radius(
             }
 
         # Resolve user-facing paths to the file paths stored in the graph.
+        original_tokens = estimate_file_tokens(root, changed_files)
         abs_files = _resolve_graph_file_paths(store, root, changed_files)
         result = store.get_impact_radius(
             abs_files, max_depth=max_depth, max_nodes=max_results
@@ -107,7 +109,7 @@ def get_impact_radius(
             key_entities = [
                 n["name"] for n in impacted_dicts[:5]
             ]
-            return {
+            minimal_response = {
                 "status": "ok",
                 "summary": "\n".join(summary_parts),
                 "risk": risk,
@@ -115,8 +117,10 @@ def get_impact_radius(
                 "key_entities": key_entities,
                 "truncated": truncated,
             }
+            attach_context_savings(minimal_response, original_tokens=original_tokens)
+            return minimal_response
 
-        return {
+        response = {
             "status": "ok",
             "summary": "\n".join(summary_parts),
             "changed_files": changed_files,
@@ -127,6 +131,8 @@ def get_impact_radius(
             "truncated": truncated,
             "total_impacted": total_impacted,
         }
+        attach_context_savings(response, original_tokens=original_tokens)
+        return response
     finally:
         store.close()
 

@@ -1,5 +1,6 @@
 """Tests for CLI helpers and MCP serve command wiring."""
 
+import json
 import logging
 import sys
 from importlib.metadata import PackageNotFoundError
@@ -147,3 +148,71 @@ class TestBuildUpdateCommands:
             postprocess="minimal",
         )
         mock_postprocess.assert_not_called()
+
+
+class TestDetectChangesCommand:
+    def test_brief_output_includes_one_estimated_savings_line(self, tmp_path, capsys):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        (repo / ".git").mkdir()
+        (repo / "app.py").write_text("x" * 2000, encoding="utf-8")
+        argv = [
+            "code-review-graph",
+            "detect-changes",
+            "--repo",
+            str(repo),
+            "--brief",
+        ]
+
+        with patch.object(sys, "argv", argv):
+            with patch("code_review_graph.graph.GraphStore") as mock_store:
+                mock_store.return_value = MagicMock()
+                with patch("code_review_graph.incremental.get_db_path") as mock_db:
+                    mock_db.return_value = MagicMock()
+                    with patch(
+                        "code_review_graph.incremental.get_changed_files",
+                        return_value=["app.py"],
+                    ):
+                        with patch(
+                            "code_review_graph.changes.analyze_changes",
+                            return_value={"summary": "summary only"},
+                        ):
+                            cli.main()
+
+        output = capsys.readouterr().out
+        assert "summary only" in output
+        assert output.count("Estimated context saved:") == 1
+
+    def test_json_output_includes_compact_savings_metadata(self, tmp_path, capsys):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        (repo / ".git").mkdir()
+        (repo / "app.py").write_text("x" * 2000, encoding="utf-8")
+        argv = [
+            "code-review-graph",
+            "detect-changes",
+            "--repo",
+            str(repo),
+        ]
+
+        with patch.object(sys, "argv", argv):
+            with patch("code_review_graph.graph.GraphStore") as mock_store:
+                mock_store.return_value = MagicMock()
+                with patch("code_review_graph.incremental.get_db_path") as mock_db:
+                    mock_db.return_value = MagicMock()
+                    with patch(
+                        "code_review_graph.incremental.get_changed_files",
+                        return_value=["app.py"],
+                    ):
+                        with patch(
+                            "code_review_graph.changes.analyze_changes",
+                            return_value={"summary": "json summary"},
+                        ):
+                            cli.main()
+
+        result = json.loads(capsys.readouterr().out)
+        assert set(result["context_savings"]) == {
+            "estimated",
+            "saved_tokens",
+            "saved_percent",
+        }

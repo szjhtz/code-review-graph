@@ -1046,6 +1046,11 @@ def main() -> None:
             print(f"Output: {wiki_dir}")
 
         elif args.command == "detect-changes":
+            from .context_savings import (
+                attach_context_savings,
+                estimate_file_tokens,
+                format_context_savings,
+            )
             from .changes import analyze_changes
             from .incremental import get_changed_files, get_staged_and_unstaged
 
@@ -1063,8 +1068,17 @@ def main() -> None:
                     repo_root=str(repo_root),
                     base=base,
                 )
+                attach_context_savings(
+                    result,
+                    original_tokens=estimate_file_tokens(repo_root, changed),
+                )
                 if args.brief:
                     print(result.get("summary", "No summary available."))
+                    savings_line = format_context_savings(
+                        result.get("context_savings")
+                    )
+                    if savings_line:
+                        print(savings_line)
                 else:
                     print(json.dumps(result, indent=2, default=str))
 
