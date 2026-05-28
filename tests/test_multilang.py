@@ -1,4 +1,4 @@
-"""Tests for Go, Rust, Java, C, C++, C#, Ruby, PHP, Kotlin, Swift, Solidity, and Vue parsing."""
+"""Tests for Go, Rust, Java, C, C++, C#, VB.NET Ruby, PHP, Kotlin, Swift, Solidity, and Vue parsing."""
 
 from pathlib import Path
 
@@ -388,6 +388,30 @@ class TestCSharpParsing:
         funcs = [n for n in self.nodes if n.kind == "Function"]
         names = {f.name for f in funcs}
         assert "FindById" in names or "Save" in names
+
+class TestVBNetParsing:
+
+    def setup_method(self):
+        self.parser = CodeParser()
+        self.nodes, self.edges = self.parser.parse_file(FIXTURES / "Sample.vb")
+
+    def test_detects_language(self):
+        assert self.parser.detect_language(Path("Program.vb")) == "vbnet"
+
+    def test_uses_regex_fallback_without_tree_sitter(self,):
+        assert any(n.language == "vbnet" for n in self.nodes)
+
+    def test_finds_classes_and_interfaces(self):
+        classes = [n for n in self.nodes if n.kind == "Class"]
+        names = {c.name for c in classes}
+        assert "User" in names
+        assert "InMemoryRepo" in names
+
+    def test_finds_methods(self):
+        funcs = [n for n in self.nodes if n.kind == "Function"]
+        names = {f.name for f in funcs}
+        assert "FindById" in names
+        assert "Save" in names
 
 
 class TestRubyParsing:

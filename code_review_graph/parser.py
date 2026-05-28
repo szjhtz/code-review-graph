@@ -141,6 +141,9 @@ EXTENSION_TO_LANGUAGE: dict[str, str] = {
     ".svh": "verilog",
     ".v": "verilog",
     ".vh": "verilog",
+    # VB.NET has no tree-sitter grammar in tree_sitter_language_pack.
+    # It is parsed by the regex fallback in _parse_vbnet.
+    ".vb": "vbnet",
     ".sql": "sql",
 }
 
@@ -247,7 +250,7 @@ _FUNCTION_TYPES: dict[str, list[str]] = {
     "java": ["method_declaration", "constructor_declaration"],
     "c": ["function_definition"],
     "cpp": ["function_definition"],
-    "csharp": ["method_declaration", "constructor_declaration"],
+    "csharp": ["method_declaration", "constructor_declaration", "operator_statement", "property_statement", ],
     "ruby": ["method", "singleton_method"],
     "r": ["function_definition"],
     "perl": ["subroutine_declaration_statement", "method_declaration_statement"],
@@ -500,6 +503,229 @@ _KAFKA_PRODUCER_TYPES = frozenset({
     "ReactiveKafkaProducerTemplate",
     "KafkaSender",
 })
+
+
+# ---------------------------------------------------------------------------
+# VB.NET regex patterns and helpers (no tree-sitter grammar bundled)
+# ---------------------------------------------------------------------------
+
+_VBNET_IDENT = r"[A-Za-z_][A-Za-z0-9_]*"
+_VBNET_DOTTED_IDENT = rf"{_VBNET_IDENT}(?:\.{_VBNET_IDENT})*"
+_VBNET_MODIFIER_WORDS = (
+    "Public",
+    "Private",
+    "Protected",
+    "Friend",
+    "Partial",
+    "Shared",
+    "Static",
+    "MustInherit",
+    "NotInheritable",
+    "Overridable",
+    "Overrides",
+    "MustOverride",
+    "Overloads",
+    "Default",
+    "ReadOnly",
+    "WriteOnly",
+    "Shadows",
+    "Async",
+    "Iterator",
+    "Declare",
+    "Narrowing",
+    "Widening",
+)
+_VBNET_MODIFIER_RE = rf"(?:(?:{'|'.join(_VBNET_MODIFIER_WORDS)})\s+)*"
+
+_VBNET_IMPORT_RE = re.compile(r"^\s*Imports\s+(.+?)\s*$", re.IGNORECASE)
+_VBNET_TYPE_RE = re.compile(
+    rf"^\s*{_VBNET_MODIFIER_RE}"
+    rf"(?P<kind>Class|Interface|Structure|Module|Enum)\s+"
+    rf"(?P<name>{_VBNET_IDENT})\b(?P<rest>.*)$",
+    re.IGNORECASE,
+)
+_VBNET_END_TYPE_RE = re.compile(
+    r"^\s*End\s+(?P<kind>Class|Interface|Structure|Module|Enum)\b",
+    re.IGNORECASE,
+)
+_VBNET_FUNC_RE = re.compile(
+    rf"^\s*(?P<mods>{_VBNET_MODIFIER_RE})"
+    rf"(?P<kind>Function|Sub)\s+(?P<name>{_VBNET_IDENT})\b(?P<rest>.*)$",
+    re.IGNORECASE,
+)
+_VBNET_PROPERTY_RE = re.compile(
+    rf"^\s*(?P<mods>{_VBNET_MODIFIER_RE})"
+    rf"(?P<kind>Property)\s+(?P<name>{_VBNET_IDENT})\b(?P<rest>.*)$",
+    re.IGNORECASE,
+)
+_VBNET_OPERATOR_RE = re.compile(
+    rf"^\s*(?P<mods>{_VBNET_MODIFIER_RE})"
+    r"(?P<kind>Operator)\s+(?P<name>\S+)\s*(?P<rest>.*)$",
+    re.IGNORECASE,
+)
+_VBNET_END_MEMBER_RE = re.compile(
+    r"^\s*End\s+(Function|Sub|Property|Operator)\b",
+    re.IGNORECASE,
+)
+_VBNET_INHERITS_RE = re.compile(r"\bInherits\s+(.+?)\s*$", re.IGNORECASE)
+_VBNET_IMPLEMENTS_RE = re.compile(r"\bImplements\s+(.+?)\s*$", re.IGNORECASE)
+_VBNET_PARAMS_RE = re.compile(r"\((?P<params>[^()]*)\)")
+_VBNET_RETURN_RE = re.compile(
+    rf"\bAs\s+(?P<return>{_VBNET_DOTTED_IDENT}(?:\s*\([^)]*\))?)",
+    re.IGNORECASE,
+)
+_VBNET_NEW_RE = re.compile(
+    rf"\bNew\s+(?P<target>{_VBNET_DOTTED_IDENT})\s*\(",
+    re.IGNORECASE,
+)
+_VBNET_CALL_RE = re.compile(
+    rf"(?<![A-Za-z0-9_.])(?P<target>{_VBNET_DOTTED_IDENT})\s*\(",
+    re.IGNORECASE,
+)
+
+_VBNET_CALL_KEYWORDS = frozenset(
+    {
+        "addhandler",
+        "and",
+        "andalso",
+        "as",
+        "call",
+        "case",
+        "catch",
+        "class",
+        "cobj",
+        "continue",
+        "ctype",
+        "directcast",
+        "do",
+        "each",
+        "else",
+        "elseif",
+        "end",
+        "enum",
+        "erase",
+        "error",
+        "event",
+        "exit",
+        "finally",
+        "for",
+        "function",
+        "get",
+        "gettype",
+        "getxmlnamespace",
+        "global",
+        "gosub",
+        "goto",
+        "if",
+        "implements",
+        "imports",
+        "inherits",
+        "interface",
+        "loop",
+        "me",
+        "module",
+        "mustinherit",
+        "namespace",
+        "new",
+        "next",
+        "not",
+        "nothing",
+        "operator",
+        "option",
+        "or",
+        "orelse",
+        "property",
+        "raiseevent",
+        "redim",
+        "rem",
+        "removehandler",
+        "resume",
+        "return",
+        "select",
+        "set",
+        "step",
+        "stop",
+        "structure",
+        "sub",
+        "synclock",
+        "then",
+        "throw",
+        "to",
+        "try",
+        "typeof",
+        "until",
+        "using",
+        "when",
+        "while",
+        "with",
+        "withevents",
+        "xor",
+    }
+)
+
+
+def _strip_vbnet_noise(text: str) -> str:
+    """Replace VB.NET comments and string contents while preserving lines."""
+    cleaned_lines: list[str] = []
+    for raw_line in text.splitlines(keepends=True):
+        line = raw_line.rstrip("\r\n")
+        ending = raw_line[len(line) :]
+        if re.match(r"^\s*Rem\b", line, re.IGNORECASE):
+            cleaned_lines.append(" " * len(line) + ending)
+            continue
+
+        out: list[str] = []
+        in_string = False
+        i = 0
+        while i < len(line):
+            ch = line[i]
+            if ch == '"':
+                out.append(ch)
+                if in_string and i + 1 < len(line) and line[i + 1] == '"':
+                    out.append(" ")
+                    i += 2
+                    continue
+                in_string = not in_string
+                i += 1
+                continue
+            if not in_string and ch == "'":
+                out.append(" " * (len(line) - i))
+                break
+            out.append(" " if in_string else ch)
+            i += 1
+
+        cleaned_lines.append("".join(out) + ending)
+    return "".join(cleaned_lines)
+
+
+def _vbnet_signature_parts(rest: str) -> tuple[Optional[str], Optional[str]]:
+    params = None
+    tail = rest
+    params_match = _VBNET_PARAMS_RE.search(rest)
+    if params_match:
+        params = re.sub(r"\s+", " ", params_match.group("params")).strip()
+        tail = rest[params_match.end() :]
+
+    return_type = None
+    return_match = _VBNET_RETURN_RE.search(tail)
+    if return_match:
+        return_type = return_match.group("return").strip()
+    return params, return_type
+
+
+def _split_vbnet_targets(value: str) -> list[str]:
+    targets: list[str] = []
+    for raw_part in value.split(","):
+        part = raw_part.strip()
+        if not part:
+            continue
+        if "=" in part:
+            part = part.split("=", 1)[1].strip()
+        part = part.removeprefix("Global.").strip()
+        part = part.split("(", 1)[0].strip()
+        if re.fullmatch(_VBNET_DOTTED_IDENT, part):
+            targets.append(part)
+    return targets
 
 
 # ---------------------------------------------------------------------------
@@ -933,6 +1159,10 @@ class CodeParser:
         # ReScript: regex-based parser (no tree-sitter grammar bundled).
         if language == "rescript":
             return self._parse_rescript(path, source)
+
+        # VB.NET: regex-based parser (no tree-sitter grammar bundled).
+        if language == "vbnet":
+            return self._parse_vbnet(path, source)
 
         # SQL: dedicated parser — tree-sitter for tables/views/functions +
         # regex fallback for CREATE PROCEDURE (unsupported by the grammar).
@@ -1545,6 +1775,331 @@ class CodeParser:
             if node.kind == "File":
                 node.extra["notebook_format"] = "databricks_py"
                 break
+
+        return nodes, edges
+
+    # ------------------------------------------------------------------
+    # VB.NET: regex-based structural parser (no tree-sitter grammar bundled)
+    # ------------------------------------------------------------------
+
+    def _parse_vbnet(
+        self,
+        path: Path,
+        source: bytes,
+    ) -> tuple[list[NodeInfo], list[EdgeInfo]]:
+        """Parse a VB.NET `.vb` file with a best-effort regex fallback."""
+        text = source.decode("utf-8", errors="replace")
+        cleaned = _strip_vbnet_noise(text)
+        lines = cleaned.splitlines()
+        file_path_str = str(path)
+        test_file = _is_test_file(file_path_str)
+
+        nodes: list[NodeInfo] = []
+        edges: list[EdgeInfo] = []
+        line_count = text.count("\n") + 1
+
+        nodes.append(
+            NodeInfo(
+                kind="File",
+                name=file_path_str,
+                file_path=file_path_str,
+                line_start=1,
+                line_end=line_count,
+                language="vbnet",
+                is_test=test_file,
+            )
+        )
+
+        type_stack: list[dict] = []
+        member_stack: list[dict] = []
+
+        def current_type() -> Optional[dict]:
+            return type_stack[-1] if type_stack else None
+
+        def close_member(line_no: int) -> None:
+            if not member_stack:
+                return
+            entry = member_stack.pop()
+            nodes[entry["node_index"]].line_end = line_no
+
+        def close_type(line_no: int, kind: str) -> None:
+            while member_stack and member_stack[-1]["type_depth"] >= len(type_stack):
+                close_member(line_no)
+            if not type_stack:
+                return
+            kind_lower = kind.lower()
+            for i in range(len(type_stack) - 1, -1, -1):
+                if type_stack[i]["kind"] == kind_lower:
+                    entry = type_stack.pop(i)
+                    nodes[entry["node_index"]].line_end = line_no
+                    return
+            entry = type_stack.pop()
+            nodes[entry["node_index"]].line_end = line_no
+
+        def emit_type_relationships(
+            line: str,
+            source_qname: str,
+            line_no: int,
+        ) -> None:
+            inherits_match = _VBNET_INHERITS_RE.search(line)
+            if inherits_match:
+                for target in _split_vbnet_targets(inherits_match.group(1)):
+                    edges.append(
+                        EdgeInfo(
+                            kind="INHERITS",
+                            source=source_qname,
+                            target=target,
+                            file_path=file_path_str,
+                            line=line_no,
+                        )
+                    )
+
+            implements_match = _VBNET_IMPLEMENTS_RE.search(line)
+            if implements_match:
+                for target in _split_vbnet_targets(implements_match.group(1)):
+                    edges.append(
+                        EdgeInfo(
+                            kind="IMPLEMENTS",
+                            source=source_qname,
+                            target=target,
+                            file_path=file_path_str,
+                            line=line_no,
+                        )
+                    )
+
+        def emit_calls(line: str, source_qname: str, line_no: int) -> None:
+            for match in _VBNET_NEW_RE.finditer(line):
+                target = match.group("target").split(".")[-1]
+                if target.lower() not in _VBNET_CALL_KEYWORDS:
+                    edges.append(
+                        EdgeInfo(
+                            kind="CALLS",
+                            source=source_qname,
+                            target=target,
+                            file_path=file_path_str,
+                            line=line_no,
+                        )
+                    )
+
+            for match in _VBNET_CALL_RE.finditer(line):
+                target = match.group("target")
+                prefix = line[: match.start()].rstrip().lower()
+                if prefix.endswith("new"):
+                    continue
+                top_level = target.split(".", 1)[0].lower()
+                if top_level in _VBNET_CALL_KEYWORDS:
+                    continue
+                edges.append(
+                    EdgeInfo(
+                        kind="CALLS",
+                        source=source_qname,
+                        target=target,
+                        file_path=file_path_str,
+                        line=line_no,
+                    )
+                )
+
+        for line_no, line in enumerate(lines, start=1):
+            if not line.strip():
+                continue
+
+            import_match = _VBNET_IMPORT_RE.match(line)
+            if import_match:
+                for target in _split_vbnet_targets(import_match.group(1)):
+                    edges.append(
+                        EdgeInfo(
+                            kind="IMPORTS_FROM",
+                            source=file_path_str,
+                            target=target,
+                            file_path=file_path_str,
+                            line=line_no,
+                        )
+                    )
+                continue
+
+            end_member_match = _VBNET_END_MEMBER_RE.match(line)
+            if end_member_match:
+                close_member(line_no)
+                continue
+
+            end_type_match = _VBNET_END_TYPE_RE.match(line)
+            if end_type_match:
+                close_type(line_no, end_type_match.group("kind"))
+                continue
+
+            type_match = _VBNET_TYPE_RE.match(line)
+            if type_match:
+                name = type_match.group("name")
+                vb_kind = type_match.group("kind").lower()
+                parent_entry = current_type()
+                parent_name = parent_entry["name"] if parent_entry else None
+                node_index = len(nodes)
+                nodes.append(
+                    NodeInfo(
+                        kind="Class",
+                        name=name,
+                        file_path=file_path_str,
+                        line_start=line_no,
+                        line_end=line_no,
+                        language="vbnet",
+                        parent_name=parent_name,
+                        extra={"vbnet_kind": vb_kind},
+                    )
+                )
+                qname = self._qualify(name, file_path_str, parent_name)
+                edges.append(
+                    EdgeInfo(
+                        kind="CONTAINS",
+                        source=file_path_str,
+                        target=qname,
+                        file_path=file_path_str,
+                        line=line_no,
+                    )
+                )
+                type_stack.append(
+                    {
+                        "name": name,
+                        "kind": vb_kind,
+                        "parent": parent_name,
+                        "node_index": node_index,
+                    }
+                )
+                emit_type_relationships(type_match.group("rest"), qname, line_no)
+                continue
+
+            type_entry = current_type()
+            if type_entry:
+                type_qname = self._qualify(
+                    type_entry["name"],
+                    file_path_str,
+                    type_entry["parent"],
+                )
+                if re.match(r"^\s*(Inherits|Implements)\b", line, re.IGNORECASE):
+                    emit_type_relationships(line, type_qname, line_no)
+                    continue
+
+            member_match = (
+                _VBNET_FUNC_RE.match(line)
+                or _VBNET_PROPERTY_RE.match(line)
+                or _VBNET_OPERATOR_RE.match(line)
+            )
+            if member_match:
+                member_kind = member_match.group("kind").lower()
+                name = member_match.group("name")
+                if member_kind == "operator":
+                    name = f"operator_{name}"
+                rest = member_match.group("rest")
+                modifiers = (
+                    re.sub(
+                        r"\s+",
+                        " ",
+                        member_match.group("mods").strip(),
+                    )
+                    or None
+                )
+                params, return_type = _vbnet_signature_parts(rest)
+                parent_entry = current_type()
+                parent_name = parent_entry["name"] if parent_entry else None
+                container = (
+                    self._qualify(
+                        parent_entry["name"],
+                        file_path_str,
+                        parent_entry["parent"],
+                    )
+                    if parent_entry
+                    else file_path_str
+                )
+                is_test = _is_test_function(name, file_path_str)
+                node_kind = "Test" if is_test else "Function"
+                qname = self._qualify(name, file_path_str, parent_name)
+
+                node_index = len(nodes)
+                nodes.append(
+                    NodeInfo(
+                        kind=node_kind,
+                        name=name,
+                        file_path=file_path_str,
+                        line_start=line_no,
+                        line_end=line_no,
+                        language="vbnet",
+                        parent_name=parent_name,
+                        params=params,
+                        return_type=return_type,
+                        modifiers=modifiers,
+                        is_test=is_test,
+                        extra={"vbnet_kind": member_kind},
+                    )
+                )
+                edges.append(
+                    EdgeInfo(
+                        kind="CONTAINS",
+                        source=container,
+                        target=qname,
+                        file_path=file_path_str,
+                        line=line_no,
+                    )
+                )
+
+                implements_match = _VBNET_IMPLEMENTS_RE.search(rest)
+                if implements_match:
+                    for target in _split_vbnet_targets(implements_match.group(1)):
+                        edges.append(
+                            EdgeInfo(
+                                kind="IMPLEMENTS",
+                                source=qname,
+                                target=target,
+                                file_path=file_path_str,
+                                line=line_no,
+                            )
+                        )
+
+                modifier_words = {word.lower() for word in (modifiers or "").split()}
+                has_body = (
+                    member_kind in {"function", "sub", "operator"}
+                    and (not parent_entry or parent_entry["kind"] != "interface")
+                    and "mustoverride" not in modifier_words
+                    and "declare" not in modifier_words
+                )
+                if has_body:
+                    member_stack.append(
+                        {
+                            "name": name,
+                            "parent": parent_name,
+                            "qname": qname,
+                            "node_index": node_index,
+                            "type_depth": len(type_stack),
+                        }
+                    )
+                continue
+
+            if member_stack:
+                emit_calls(line, member_stack[-1]["qname"], line_no)
+
+        while member_stack:
+            close_member(line_count)
+        while type_stack:
+            entry = type_stack.pop()
+            nodes[entry["node_index"]].line_end = line_count
+
+        edges = self._resolve_call_targets(nodes, edges, file_path_str)
+
+        if test_file:
+            test_qnames = {
+                self._qualify(n.name, n.file_path, n.parent_name)
+                for n in nodes
+                if n.is_test
+            }
+            for edge in list(edges):
+                if edge.kind == "CALLS" and edge.source in test_qnames:
+                    edges.append(
+                        EdgeInfo(
+                            kind="TESTED_BY",
+                            source=edge.target,
+                            target=edge.source,
+                            file_path=edge.file_path,
+                            line=edge.line,
+                        )
+                    )
 
         return nodes, edges
 
