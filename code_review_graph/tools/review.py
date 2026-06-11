@@ -11,9 +11,7 @@ from ..context_savings import attach_context_savings, estimate_file_tokens
 from ..flows import get_affected_flows as _get_affected_flows
 from ..graph import edge_to_dict, node_to_dict
 from ..hints import generate_hints, get_session
-from ._common import _get_store, resolve_changed_files
-from ..incremental import get_changed_files, get_staged_and_unstaged
-from ._common import _get_store, _resolve_graph_file_paths
+from ._common import _get_store, _resolve_graph_file_paths, resolve_changed_files
 
 logger = logging.getLogger(__name__)
 

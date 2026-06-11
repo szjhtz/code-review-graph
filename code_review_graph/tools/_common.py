@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import threading
 import time
@@ -10,7 +11,10 @@ from pathlib import Path
 from typing import Any
 
 from ..graph import GraphStore
-from ..incremental import find_project_root, get_db_path
+from ..incremental import detect_vcs, find_project_root, get_db_path
+
+_SAFE_GIT_REF = re.compile(r"^[A-Za-z0-9_.~^/@{}\\-]+$")
+_SAFE_SVN_REV = re.compile(r"^r?\d+(:r?\d+|:HEAD|:BASE|:COMMITTED)?$", re.IGNORECASE)
 
 
 def _error_response(
@@ -82,6 +86,20 @@ def _run_git(root: Path, args: list[str], timeout_s: float) -> subprocess.Comple
     )
 
 
+def _run_svn(root: Path, args: list[str], timeout_s: float) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["svn", *args],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        cwd=str(root),
+        timeout=timeout_s,
+        stdin=subprocess.DEVNULL,
+        check=False,
+    )
+
+
 def _normalize_changed_files(files: list[str]) -> list[str]:
     seen: set[str] = set()
     out: list[str] = []
@@ -142,34 +160,78 @@ def resolve_changed_files(
                 "cache_hit": True,
             }
 
+    vcs = detect_vcs(root)
+    if vcs == "none":
+        return [], {
+            "source": "auto",
+            "auto_detect_timed_out": False,
+            "timeout_seconds": _FAST_DIFF_TIMEOUT,
+            "cache_hit": False,
+        }
+
     timed_out = False
     files: list[str] = []
-    try:
-        diff = _run_git(root, ["diff", "--name-only", base, "--"], _FAST_DIFF_TIMEOUT)
-        if diff.returncode == 0:
-            files.extend(diff.stdout.splitlines())
-        else:
-            cached_only = _run_git(
+
+    if vcs == "svn":
+        try:
+            rev_range = base if _SAFE_SVN_REV.match(base) else None
+            if rev_range:
+                diff = _run_svn(
+                    root,
+                    ["diff", "--summarize", "--non-interactive", "-r", rev_range],
+                    _FAST_DIFF_TIMEOUT,
+                )
+                if diff.returncode == 0:
+                    for line in diff.stdout.splitlines():
+                        if len(line) >= 2 and line[0] in ("M", "A", "D"):
+                            files.append(line[1:].strip())
+            else:
+                status = _run_svn(
+                    root,
+                    ["status", "--non-interactive"],
+                    _FAST_DIFF_TIMEOUT,
+                )
+                if status.returncode == 0:
+                    for line in status.stdout.splitlines():
+                        if len(line) < 2:
+                            continue
+                        status_char = line[0]
+                        if status_char in ("M", "A", "D", "R", "C"):
+                            path = line[8:].strip() if len(line) > 8 else line[1:].strip()
+                            files.append(path)
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            timed_out = True
+    else:  # git
+        if not _SAFE_GIT_REF.match(base):
+            raise ValueError(f"Invalid git ref: {base}")
+
+        try:
+            diff = _run_git(root, ["diff", "--name-only", base, "--"], _FAST_DIFF_TIMEOUT)
+            if diff.returncode == 0:
+                files.extend(diff.stdout.splitlines())
+            else:
+                cached_only = _run_git(
+                    root,
+                    ["diff", "--name-only", "--cached"],
+                    _FAST_DIFF_TIMEOUT,
+                )
+                if cached_only.returncode == 0:
+                    files.extend(cached_only.stdout.splitlines())
+
+            status = _run_git(
                 root,
-                ["diff", "--name-only", "--cached"],
+                ["status", "--porcelain"],
                 _FAST_DIFF_TIMEOUT,
             )
-            if cached_only.returncode == 0:
-                files.extend(cached_only.stdout.splitlines())
-
-        status = _run_git(
-            root,
-            ["status", "--porcelain", "--untracked-files=no"],
-            _FAST_DIFF_TIMEOUT,
-        )
-        if status.returncode == 0:
-            files.extend(_parse_porcelain_paths(status.stdout))
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        timed_out = True
+            if status.returncode == 0:
+                files.extend(_parse_porcelain_paths(status.stdout))
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            timed_out = True
 
     normalized = _normalize_changed_files(files)
-    with _CHANGED_FILES_CACHE_LOCK:
-        _CHANGED_FILES_CACHE[cache_key] = {"ts": now, "files": normalized}
+    if not timed_out:
+        with _CHANGED_FILES_CACHE_LOCK:
+            _CHANGED_FILES_CACHE[cache_key] = {"ts": now, "files": normalized}
 
     return normalized, {
         "source": "auto",

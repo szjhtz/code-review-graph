@@ -2,7 +2,7 @@
 
 import tempfile
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from code_review_graph.changes import (
     _parse_unified_diff,
@@ -653,3 +653,187 @@ class TestAnalyzeChangesInternalParseRemap:
         # No remapping: keys passed through exactly as the caller gave them.
         assert list(captured["ranges"]) == ["app.py"]
         assert any(f["name"] == "rel_func" for f in result["changed_functions"])
+
+
+class TestResolveChangedFiles:
+    """Unit tests for resolve_changed_files cache, timeout, security, and SVN support."""
+
+    def setup_method(self):
+        # Clear the cache before each test
+        from code_review_graph.tools._common import _CHANGED_FILES_CACHE
+        _CHANGED_FILES_CACHE.clear()
+
+    def test_cache_hit_and_expiry(self, monkeypatch):
+        from code_review_graph.tools._common import resolve_changed_files
+        from pathlib import Path
+        import time
+
+        # Set cache TTL very low for test
+        monkeypatch.setattr("code_review_graph.tools._common._CHANGED_FILES_CACHE_TTL", 0.05)
+
+        root = Path("/fake/repo")
+        base = "HEAD~1"
+
+        with (
+            patch("code_review_graph.tools._common.detect_vcs", return_value="git"),
+            patch("code_review_graph.tools._common._run_git") as mock_run_git,
+        ):
+            # First call: cache miss, runs git
+            mock_run_git.side_effect = [
+                MagicMock(returncode=0, stdout="file1.py\n"), # diff
+                MagicMock(returncode=0, stdout=""), # status
+            ]
+            files, meta = resolve_changed_files(root, changed_files=None, base=base)
+            assert files == ["file1.py"]
+            assert meta["cache_hit"] is False
+
+            # Second call: cache hit
+            files, meta = resolve_changed_files(root, changed_files=None, base=base)
+            assert files == ["file1.py"]
+            assert meta["cache_hit"] is True
+
+            # Wait for TTL to expire
+            time.sleep(0.06)
+
+            # Third call: cache expired, runs git again
+            mock_run_git.side_effect = [
+                MagicMock(returncode=0, stdout="file2.py\n"), # diff
+                MagicMock(returncode=0, stdout=""), # status
+            ]
+            files, meta = resolve_changed_files(root, changed_files=None, base=base)
+            assert files == ["file2.py"]
+            assert meta["cache_hit"] is False
+
+    def test_head_invalidation_cache_key(self):
+        from code_review_graph.tools._common import resolve_changed_files
+        from pathlib import Path
+
+        root = Path("/fake/repo")
+
+        with (
+            patch("code_review_graph.tools._common.detect_vcs", return_value="git"),
+            patch("code_review_graph.tools._common._run_git") as mock_run_git,
+        ):
+            mock_run_git.side_effect = [
+                MagicMock(returncode=0, stdout="file1.py\n"), # diff
+                MagicMock(returncode=0, stdout=""), # status
+            ]
+            
+            # Call for HEAD~1
+            files, meta = resolve_changed_files(root, changed_files=None, base="HEAD~1")
+            assert files == ["file1.py"]
+            assert meta["cache_hit"] is False
+
+            # Call for HEAD~2 (different cache key)
+            mock_run_git.side_effect = [
+                MagicMock(returncode=0, stdout="file2.py\n"), # diff
+                MagicMock(returncode=0, stdout=""), # status
+            ]
+            files, meta = resolve_changed_files(root, changed_files=None, base="HEAD~2")
+            assert files == ["file2.py"]
+            assert meta["cache_hit"] is False
+
+    def test_invalid_git_refs_rejected(self):
+        from code_review_graph.tools._common import resolve_changed_files
+        from pathlib import Path
+        import pytest
+
+        root = Path("/fake/repo")
+
+        with patch("code_review_graph.tools._common.detect_vcs", return_value="git"):
+            # Semi-colon injection
+            with pytest.raises(ValueError, match="Invalid git ref"):
+                resolve_changed_files(root, changed_files=None, base="HEAD; rm -rf /")
+
+            # Space/invalid characters
+            with pytest.raises(ValueError, match="Invalid git ref"):
+                resolve_changed_files(root, changed_files=None, base="main..origin/main --other-flag")
+
+    def test_timeout_results_not_cached(self):
+        from code_review_graph.tools._common import resolve_changed_files, _CHANGED_FILES_CACHE
+        from pathlib import Path
+        import subprocess
+
+        root = Path("/fake/repo")
+        base = "HEAD~1"
+
+        with (
+            patch("code_review_graph.tools._common.detect_vcs", return_value="git"),
+            patch("code_review_graph.tools._common._run_git", side_effect=subprocess.TimeoutExpired("git diff", 5)),
+        ):
+            # Timed out call: not cached
+            files, meta = resolve_changed_files(root, changed_files=None, base=base)
+            assert files == []
+            assert meta["auto_detect_timed_out"] is True
+            assert len(_CHANGED_FILES_CACHE) == 0
+
+        # Subsequent call when git works successfully
+        with (
+            patch("code_review_graph.tools._common.detect_vcs", return_value="git"),
+            patch("code_review_graph.tools._common._run_git") as mock_run_git,
+        ):
+            mock_run_git.side_effect = [
+                MagicMock(returncode=0, stdout="file1.py\n"), # diff
+                MagicMock(returncode=0, stdout=""), # status
+            ]
+            files, meta = resolve_changed_files(root, changed_files=None, base=base)
+            assert files == ["file1.py"]
+            assert meta["auto_detect_timed_out"] is False
+            assert meta["cache_hit"] is False
+
+    def test_svn_compatibility(self):
+        from code_review_graph.tools._common import resolve_changed_files
+        from pathlib import Path
+
+        root = Path("/fake/repo")
+        base = "HEAD~1"
+
+        with (
+            patch("code_review_graph.tools._common.detect_vcs", return_value="svn"),
+            patch("code_review_graph.tools._common._run_svn") as mock_run_svn,
+        ):
+            # Case 1: Base is not valid SVN rev -> falls back to svn status
+            # Mock status output: modified file.py, added file2.py, deleted file3.py
+            status_stdout = (
+                "M       file.py\n"
+                "A       file2.py\n"
+                "D       file3.py\n"
+            )
+            mock_run_svn.return_value = MagicMock(returncode=0, stdout=status_stdout)
+            files, meta = resolve_changed_files(root, changed_files=None, base=base)
+            assert sorted(files) == sorted(["file.py", "file2.py", "file3.py"])
+            assert meta["source"] == "auto"
+
+            # Case 2: Base is valid SVN rev (e.g. r123) -> svn diff --summarize
+            mock_run_svn.reset_mock()
+            diff_stdout = (
+                "M       file4.py\n"
+                "A       file5.py\n"
+            )
+            mock_run_svn.return_value = MagicMock(returncode=0, stdout=diff_stdout)
+            files, meta = resolve_changed_files(root, changed_files=None, base="r123")
+            assert sorted(files) == sorted(["file4.py", "file5.py"])
+            assert mock_run_svn.call_args[0][1][1] == "--summarize"
+
+    def test_untracked_file_handling(self):
+        from code_review_graph.tools._common import resolve_changed_files
+        from pathlib import Path
+
+        root = Path("/fake/repo")
+        base = "HEAD~1"
+
+        with (
+            patch("code_review_graph.tools._common.detect_vcs", return_value="git"),
+            patch("code_review_graph.tools._common._run_git") as mock_run_git,
+        ):
+            # Mock diff returns empty, but status --porcelain shows untracked file ?? new.py
+            # and modified file mod.py
+            mock_run_git.side_effect = [
+                MagicMock(returncode=0, stdout=""), # git diff base
+                MagicMock(returncode=0, stdout="?? new.py\n M mod.py\n"), # git status --porcelain
+            ]
+            files, meta = resolve_changed_files(root, changed_files=None, base=base)
+            assert sorted(files) == sorted(["new.py", "mod.py"])
+            # Verify git status did NOT use --untracked-files=no
+            status_args = mock_run_git.call_args_list[1][0][1]
+            assert "--untracked-files=no" not in status_args

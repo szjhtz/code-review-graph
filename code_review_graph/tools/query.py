@@ -12,8 +12,7 @@ from ..graph import _sanitize_name, edge_to_dict, node_to_dict
 from ..hints import generate_hints, get_session
 from ..incremental import get_db_path
 from ..search import hybrid_search
-from ._common import _BUILTIN_CALL_NAMES, _get_store, resolve_changed_files
-from ._common import _BUILTIN_CALL_NAMES, _get_store, _resolve_graph_file_paths
+from ._common import _BUILTIN_CALL_NAMES, _get_store, _resolve_graph_file_paths, resolve_changed_files
 
 logger = logging.getLogger(__name__)
 
