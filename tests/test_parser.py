@@ -1458,3 +1458,267 @@ class TestCppScopedFunctionName:
         fns = [n for n in nodes if n.kind == "Function"]
         assert len(fns) == 1
         assert fns[0].name == "get_obj_fingerprint"
+
+
+# ---------------------------------------------------------------------------
+# Java microservice config extraction
+# ---------------------------------------------------------------------------
+
+
+class TestJavaMicroserviceAnnotations:
+    """Tests for @RegisterRestClient, @Path, and HTTP method annotation extraction."""
+
+    def setup_method(self):
+        self.parser = CodeParser()
+
+    def test_register_rest_client_config_key(self):
+        """@RegisterRestClient(configKey=...) is stored in extra['rest_client_config_key']."""
+        nodes, _ = self.parser.parse_bytes(
+            Path("/src/MyClient.java"),
+            b"import org.eclipse.microprofile.rest.client.inject.RegisterRestClient;\n"
+            b"import jakarta.ws.rs.Path;\n"
+            b"@RegisterRestClient(configKey = \"my-service-api\")\n"
+            b"@Path(\"/api/v1\")\n"
+            b"public interface MyClient {\n"
+            b"}\n",
+        )
+        classes = [n for n in nodes if n.kind == "Class"]
+        assert len(classes) == 1
+        assert classes[0].extra.get("rest_client") is True
+        assert classes[0].extra.get("rest_client_config_key") == "my-service-api"
+
+    def test_register_rest_client_class_path(self):
+        """@Path on a @RegisterRestClient interface is stored in extra['http_path']."""
+        nodes, _ = self.parser.parse_bytes(
+            Path("/src/MyClient.java"),
+            b"@RegisterRestClient(configKey = \"svc-api\")\n"
+            b"@Path(\"/api/v1/resource\")\n"
+            b"public interface MyClient {\n"
+            b"}\n",
+        )
+        classes = [n for n in nodes if n.kind == "Class"]
+        assert classes[0].extra.get("http_path") == "/api/v1/resource"
+
+    def test_http_method_get_on_interface_method(self):
+        """@GET on an interface method is stored in extra['http_method']."""
+        nodes, _ = self.parser.parse_bytes(
+            Path("/src/MyClient.java"),
+            b"@RegisterRestClient(configKey = \"svc-api\")\n"
+            b"public interface MyClient {\n"
+            b"    @GET\n"
+            b"    @Path(\"/items\")\n"
+            b"    List<Item> getItems();\n"
+            b"}\n",
+        )
+        fns = [n for n in nodes if n.kind == "Function"]
+        assert len(fns) == 1
+        assert fns[0].extra.get("http_method") == "GET"
+        assert fns[0].extra.get("http_path") == "/items"
+
+    def test_http_method_post_on_interface_method(self):
+        """@POST on an interface method is stored in extra['http_method']."""
+        nodes, _ = self.parser.parse_bytes(
+            Path("/src/MyClient.java"),
+            b"@RegisterRestClient(configKey = \"svc-api\")\n"
+            b"public interface MyClient {\n"
+            b"    @POST\n"
+            b"    @Path(\"/items\")\n"
+            b"    Item createItem(Item item);\n"
+            b"}\n",
+        )
+        fns = [n for n in nodes if n.kind == "Function"]
+        assert fns[0].extra.get("http_method") == "POST"
+
+    def test_http_method_delete_on_interface_method(self):
+        """@DELETE on an interface method is stored in extra['http_method']."""
+        nodes, _ = self.parser.parse_bytes(
+            Path("/src/MyClient.java"),
+            b"@RegisterRestClient(configKey = \"svc-api\")\n"
+            b"public interface MyClient {\n"
+            b"    @DELETE\n"
+            b"    @Path(\"/items/{id}\")\n"
+            b"    void deleteItem(String id);\n"
+            b"}\n",
+        )
+        fns = [n for n in nodes if n.kind == "Function"]
+        assert fns[0].extra.get("http_method") == "DELETE"
+
+    def test_non_rest_client_class_not_marked(self):
+        """Classes without @RegisterRestClient do not get extra['rest_client']."""
+        nodes, _ = self.parser.parse_bytes(
+            Path("/src/MyService.java"),
+            b"public class MyService {\n"
+            b"    public void doWork() {}\n"
+            b"}\n",
+        )
+        classes = [n for n in nodes if n.kind == "Class"]
+        assert classes[0].extra.get("rest_client") is None
+
+    def test_method_without_http_annotation_has_no_http_method(self):
+        """Methods without HTTP annotations do not get extra['http_method']."""
+        nodes, _ = self.parser.parse_bytes(
+            Path("/src/MyService.java"),
+            b"public class MyService {\n"
+            b"    public String helper() { return null; }\n"
+            b"}\n",
+        )
+        fns = [n for n in nodes if n.kind == "Function"]
+        assert fns[0].extra.get("http_method") is None
+
+
+class TestQuarkusConfigParser:
+    """Tests for application.yml / .properties config file parsing."""
+
+    def setup_method(self):
+        self.parser = CodeParser()
+
+    def test_detect_language_application_yml(self, tmp_path):
+        """application.yml is detected as quarkus-config."""
+        p = tmp_path / "application.yml"
+        p.write_text("quarkus:\n  http:\n    port: 8080\n")
+        assert self.parser.detect_language(p) == "quarkus-config"
+
+    def test_detect_language_application_yaml(self, tmp_path):
+        """application.yaml is detected as quarkus-config."""
+        p = tmp_path / "application.yaml"
+        p.write_text("quarkus:\n  http:\n    port: 8080\n")
+        assert self.parser.detect_language(p) == "quarkus-config"
+
+    def test_detect_language_application_local_yml(self, tmp_path):
+        """application-local.yml is detected as quarkus-config."""
+        p = tmp_path / "application-local.yml"
+        p.write_text("quarkus:\n  http:\n    port: 8080\n")
+        assert self.parser.detect_language(p) == "quarkus-config"
+
+    def test_detect_language_properties(self):
+        """*.properties is detected as properties language."""
+        assert self.parser.detect_language(Path("application.properties")) == "properties"
+
+    def test_detect_language_non_application_yml_is_none(self, tmp_path):
+        """A .yml file not named application*.yml is not detected as quarkus-config."""
+        p = tmp_path / "docker-compose.yml"
+        p.write_text("version: '3'\n")
+        assert self.parser.detect_language(p) is None
+
+    def test_quarkus_rest_client_url_emits_config_node(self, tmp_path):
+        """quarkus.rest-client.<key>.url emits a Config node."""
+        p = tmp_path / "application.yml"
+        p.write_text(
+            "quarkus:\n"
+            "  rest-client:\n"
+            "    my-service-api:\n"
+            "      url: https://api.example.com/my-service/api\n"
+        )
+        nodes, _ = self.parser.parse_bytes(p, p.read_bytes())
+        config_nodes = [n for n in nodes if n.kind == "Config"]
+        names = {n.name for n in config_nodes}
+        assert "rest-client:my-service-api" in names
+        node = next(n for n in config_nodes if n.name == "rest-client:my-service-api")
+        assert node.extra["config_key"] == "my-service-api"
+        assert node.extra["url"] == "https://api.example.com/my-service/api"
+
+    def test_quarkus_multiple_rest_clients(self, tmp_path):
+        """Multiple quarkus.rest-client entries each emit a Config node."""
+        p = tmp_path / "application.yml"
+        p.write_text(
+            "quarkus:\n"
+            "  rest-client:\n"
+            "    service-a-api:\n"
+            "      url: https://api.example.com/a\n"
+            "    service-b-api:\n"
+            "      url: https://api.example.com/b\n"
+        )
+        nodes, _ = self.parser.parse_bytes(p, p.read_bytes())
+        config_nodes = [n for n in nodes if n.kind == "Config"]
+        names = {n.name for n in config_nodes}
+        assert "rest-client:service-a-api" in names
+        assert "rest-client:service-b-api" in names
+
+    def test_redis_channels_emits_config_node(self, tmp_path):
+        """redis.channels list emits a Config node with channels list."""
+        p = tmp_path / "application.yml"
+        p.write_text(
+            "redis:\n"
+            "  channels:\n"
+            "    - allergy_channel\n"
+            "    - medication_channel\n"
+        )
+        nodes, _ = self.parser.parse_bytes(p, p.read_bytes())
+        config_nodes = [n for n in nodes if n.kind == "Config"]
+        names = {n.name for n in config_nodes}
+        assert "redis:channels" in names
+        node = next(n for n in config_nodes if n.name == "redis:channels")
+        assert "allergy_channel" in node.extra["channels"]
+        assert "medication_channel" in node.extra["channels"]
+
+    def test_kafka_bootstrap_emits_config_node(self, tmp_path):
+        """kafka.bootstrap.servers emits a Config node."""
+        p = tmp_path / "application.yml"
+        p.write_text(
+            "kafka:\n"
+            "  bootstrap:\n"
+            "    servers: localhost:9092\n"
+        )
+        nodes, _ = self.parser.parse_bytes(p, p.read_bytes())
+        config_nodes = [n for n in nodes if n.kind == "Config"]
+        names = {n.name for n in config_nodes}
+        assert "kafka:bootstrap" in names
+
+    def test_mp_messaging_outgoing_topic_emits_config_node(self, tmp_path):
+        """mp.messaging.outgoing.<channel>.topic emits a Config node."""
+        p = tmp_path / "application.yml"
+        p.write_text(
+            "mp:\n"
+            "  messaging:\n"
+            "    outgoing:\n"
+            "      stock-producer:\n"
+            "        connector: smallrye-kafka\n"
+            "        topic: product\n"
+        )
+        nodes, _ = self.parser.parse_bytes(p, p.read_bytes())
+        config_nodes = [n for n in nodes if n.kind == "Config"]
+        names = {n.name for n in config_nodes}
+        assert "kafka:product" in names
+        node = next(n for n in config_nodes if n.name == "kafka:product")
+        assert node.extra["config_type"] == "kafka_outgoing"
+        assert node.extra["topic"] == "product"
+        assert node.extra["channel"] == "stock-producer"
+
+    def test_mp_messaging_incoming_topic_emits_config_node(self, tmp_path):
+        """mp.messaging.incoming.<channel>.topic emits a Config node."""
+        p = tmp_path / "application.yml"
+        p.write_text(
+            "mp:\n"
+            "  messaging:\n"
+            "    incoming:\n"
+            "      order-consumer:\n"
+            "        connector: smallrye-kafka\n"
+            "        topic: orders\n"
+        )
+        nodes, _ = self.parser.parse_bytes(p, p.read_bytes())
+        config_nodes = [n for n in nodes if n.kind == "Config"]
+        names = {n.name for n in config_nodes}
+        assert "kafka:orders" in names
+        node = next(n for n in config_nodes if n.name == "kafka:orders")
+        assert node.extra["config_type"] == "kafka_incoming"
+
+    def test_spring_boot_kafka_bootstrap_emits_config_node(self, tmp_path):
+        """spring.kafka.bootstrap-servers emits a Config node."""
+        p = tmp_path / "application.yml"
+        p.write_text(
+            "spring:\n"
+            "  kafka:\n"
+            "    bootstrap-servers: localhost:9092\n"
+        )
+        nodes, _ = self.parser.parse_bytes(p, p.read_bytes())
+        config_nodes = [n for n in nodes if n.kind == "Config"]
+        names = {n.name for n in config_nodes}
+        assert "kafka:bootstrap" in names
+
+    def test_empty_yml_emits_only_file_node(self, tmp_path):
+        """An empty application.yml emits only the File node."""
+        p = tmp_path / "application.yml"
+        p.write_text("")
+        nodes, edges = self.parser.parse_bytes(p, p.read_bytes())
+        assert len([n for n in nodes if n.kind == "Config"]) == 0
+        assert len([n for n in nodes if n.kind == "File"]) == 1
