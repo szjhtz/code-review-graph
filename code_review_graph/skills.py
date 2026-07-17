@@ -449,10 +449,22 @@ def install_platform_configs(
                     continue
                 existing = parsed
 
+        expected_container = list if plat["format"] == "array" else dict
+        if server_key in existing and not isinstance(
+            existing[server_key], expected_container
+        ):
+            expected_name = "array" if expected_container is list else "object"
+            actual_name = type(existing[server_key]).__name__
+            print(
+                f"  {plat['name']}: {config_path} setting {server_key!r} "
+                f"is {actual_name}; expected a JSON {expected_name} — "
+                f"skipping to avoid data loss. Please repair that setting "
+                f"or add the MCP config manually."
+            )
+            continue
+
         if plat["format"] == "array":
             arr = existing.get(server_key, [])
-            if not isinstance(arr, list):
-                arr = []
             # Check if already present
             if any(isinstance(s, dict) and s.get("name") == "code-review-graph" for s in arr):
                 print(f"  {plat['name']}: already configured in {config_path}")
@@ -463,8 +475,6 @@ def install_platform_configs(
             existing[server_key] = arr
         else:
             servers = existing.get(server_key, {})
-            if not isinstance(servers, dict):
-                servers = {}
             if "code-review-graph" in servers:
                 print(f"  {plat['name']}: already configured in {config_path}")
                 configured.append(plat["name"])

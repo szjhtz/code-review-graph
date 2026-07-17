@@ -1777,6 +1777,19 @@ class TestInstallConfigDataLoss:
         ):
             return install_platform_configs(root, target="zed")
 
+    def _run_continue(self, settings_path: Path, root: Path):
+        with patch.dict(
+            PLATFORMS,
+            {
+                "continue": {
+                    **PLATFORMS["continue"],
+                    "config_path": lambda r: settings_path,
+                    "detect": lambda: True,
+                },
+            },
+        ):
+            return install_platform_configs(root, target="continue")
+
     def test_malformed_json_is_preserved_not_overwritten(self, tmp_path, capsys):
         settings = tmp_path / "zed" / "settings.json"
         settings.parent.mkdir(parents=True)
@@ -1838,6 +1851,40 @@ class TestInstallConfigDataLoss:
         # User's existing setting preserved AND our server added.
         assert data["theme"] == "One Dark"
         assert "code-review-graph" in data["context_servers"]
+
+    def test_array_platform_preserves_wrong_typed_server_collection(
+        self, tmp_path, capsys
+    ):
+        config = tmp_path / ".continue" / "config.json"
+        config.parent.mkdir(parents=True)
+        original = '{\n  "mcpServers": {"legacy": "keep-me"}\n}\n'
+        config.write_text(original, encoding="utf-8")
+
+        configured = self._run_continue(config, tmp_path)
+
+        assert "Continue" not in configured
+        assert config.read_text(encoding="utf-8") == original
+        out = capsys.readouterr().out
+        assert "mcpServers" in out
+        assert "expected a JSON array" in out
+        assert "skipping to avoid data loss" in out
+
+    def test_object_platform_preserves_wrong_typed_server_collection(
+        self, tmp_path, capsys
+    ):
+        settings = tmp_path / "zed" / "settings.json"
+        settings.parent.mkdir(parents=True)
+        original = '{\n  "context_servers": ["legacy-server"]\n}\n'
+        settings.write_text(original, encoding="utf-8")
+
+        configured = self._run_zed(settings, tmp_path)
+
+        assert "Zed" not in configured
+        assert settings.read_text(encoding="utf-8") == original
+        out = capsys.readouterr().out
+        assert "context_servers" in out
+        assert "expected a JSON object" in out
+        assert "skipping to avoid data loss" in out
 
 
 class TestGeneratedHooksGuardGitRepo:
