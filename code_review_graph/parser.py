@@ -6,10 +6,12 @@ Extracts structural nodes (classes, functions, imports, types) and edges
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import logging
 import re
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple, Optional
@@ -32,6 +34,10 @@ _SQL_TABLE_RE = re.compile(
     r"\s+((?:`[^`]+`|\w+)(?:\.(?:`[^`]+`|\w+))*)",
     re.IGNORECASE,
 )
+
+_PYTHON_STAR_CACHE_MAX = 15_000
+_PYTHON_STAR_EXPORT_CACHE: dict[tuple[str, int, int], dict[str, str]] = {}
+_PYTHON_STAR_EXPORT_CACHE_LOCK = threading.RLock()
 
 # SQL keywords that can appear after FROM/JOIN but are NOT table names.
 _SQL_KEYWORDS: frozenset[str] = frozenset({
@@ -887,6 +893,7 @@ class CodeParser:
     _MODULE_CACHE_MAX = 15_000  # Evict cache to cap memory on huge monorepos
 
     def __init__(self, repo_root: Optional[Path] = None) -> None:
+        self._repo_root = Path(repo_root).resolve() if repo_root is not None else None
         self._parsers: dict[str, object] = {}
         self._module_file_cache: dict[str, Optional[str]] = {}
         self._export_symbol_cache: dict[str, Optional[str]] = {}
@@ -1109,6 +1116,10 @@ class CodeParser:
         import_map, defined_names = self._collect_file_scope(
             tree.root_node, language, source,
         )
+        if language == "python":
+            self._expand_python_star_imports(
+                tree.root_node, file_path_str, import_map,
+            )
 
         # Walk the tree
         self._extract_from_tree(
@@ -1541,6 +1552,10 @@ class CodeParser:
             import_map, defined_names = self._collect_file_scope(
                 tree.root_node, lang, concat_bytes,
             )
+            if lang == "python":
+                self._expand_python_star_imports(
+                    tree.root_node, file_path_str, import_map,
+                )
             self._extract_from_tree(
                 tree.root_node, concat_bytes, lang,
                 file_path_str, all_nodes, all_edges,
@@ -5816,6 +5831,202 @@ class CodeParser:
 
         return import_map, defined_names
 
+    def _expand_python_star_imports(
+        self,
+        root,
+        file_path: str,
+        import_map: dict[str, str],
+        resolving: frozenset[str] = frozenset(),
+    ) -> None:
+        """Add public names from repository-local Python star imports."""
+        for child in root.children:
+            if child.type != "import_from_statement":
+                continue
+            if not any(part.type == "wildcard_import" for part in child.children):
+                continue
+            module_node = child.child_by_field_name("module_name")
+            if module_node is None:
+                continue
+            module = module_node.text.decode("utf-8", errors="replace")
+            resolved = self._resolve_python_module_in_repo(module, file_path)
+            if resolved is None or resolved in resolving:
+                continue
+            for name, origin in self._get_python_star_exports(
+                resolved, resolving,
+            ).items():
+                import_map.setdefault(name, origin)
+
+    def _get_python_star_exports(
+        self,
+        module_file: str,
+        resolving: frozenset[str] = frozenset(),
+    ) -> dict[str, str]:
+        """Return exported names mapped to their repository-local origin files."""
+        try:
+            module_path = Path(module_file).resolve()
+            file_stat = module_path.stat()
+        except (OSError, ValueError):
+            return {}
+        resolved_module = str(module_path)
+        if resolved_module in resolving:
+            return {}
+
+        cache_key = (resolved_module, file_stat.st_mtime_ns, file_stat.st_size)
+        with _PYTHON_STAR_EXPORT_CACHE_LOCK:
+            cached = _PYTHON_STAR_EXPORT_CACHE.get(cache_key)
+            if cached is not None:
+                return dict(cached)
+
+            exports = self._read_python_star_exports(
+                module_path, resolving,
+            )
+            stale_keys = [
+                key for key in _PYTHON_STAR_EXPORT_CACHE
+                if key[0] == resolved_module and key != cache_key
+            ]
+            for stale_key in stale_keys:
+                _PYTHON_STAR_EXPORT_CACHE.pop(stale_key, None)
+            if len(_PYTHON_STAR_EXPORT_CACHE) >= _PYTHON_STAR_CACHE_MAX:
+                oldest_keys = list(_PYTHON_STAR_EXPORT_CACHE)[: _PYTHON_STAR_CACHE_MAX // 2]
+                for oldest_key in oldest_keys:
+                    _PYTHON_STAR_EXPORT_CACHE.pop(oldest_key, None)
+            _PYTHON_STAR_EXPORT_CACHE[cache_key] = dict(exports)
+            return exports
+
+    def _read_python_star_exports(
+        self,
+        module_path: Path,
+        resolving: frozenset[str],
+    ) -> dict[str, str]:
+        """Read and parse one Python module for star-export discovery."""
+        resolved_module = str(module_path)
+        try:
+            source = module_path.read_bytes()
+        except (OSError, PermissionError):
+            return {}
+        try:
+            parser = self._get_parser("python")
+            if not parser:
+                return {}
+            tree = parser.parse(source)  # type: ignore[union-attr]
+            import_map, defined_names = self._collect_file_scope(
+                tree.root_node, "python", source,
+            )
+
+            origins: dict[str, str] = {}
+            next_resolving = resolving | {resolved_module}
+            self._expand_python_star_imports(
+                tree.root_node, resolved_module, origins, next_resolving,
+            )
+            for name, module in import_map.items():
+                origin = self._resolve_python_module_in_repo(module, resolved_module)
+                if origin is not None:
+                    origins[name] = origin
+            for name in defined_names:
+                origins[name] = resolved_module
+
+            explicit_exports = self._extract_python_dunder_all(tree.root_node)
+            if explicit_exports is not None:
+                return {
+                    name: origins.get(name, resolved_module)
+                    for name in explicit_exports
+                }
+            return {
+                name: origin
+                for name, origin in origins.items()
+                if not name.startswith("_")
+            }
+        except Exception as exc:
+            logger.debug(
+                "Skipping Python star exports for %s: %s",
+                module_path,
+                exc,
+            )
+            return {}
+
+    @staticmethod
+    def _extract_python_dunder_all(root) -> Optional[set[str]]:
+        """Return literal string names from ``__all__``, or None if absent."""
+        for child in root.children:
+            if child.type != "assignment":
+                continue
+            left = child.child_by_field_name("left")
+            if left is None or left.type != "identifier" or left.text != b"__all__":
+                continue
+            right = child.child_by_field_name("right")
+            if right is None:
+                return set()
+            try:
+                value = ast.literal_eval(right.text.decode("utf-8", errors="replace"))
+            except (SyntaxError, ValueError):
+                return set()
+            if not isinstance(value, (list, tuple)):
+                return set()
+            return {name for name in value if isinstance(name, str)}
+        return None
+
+    def _python_repo_boundary(self, file_path: str) -> Path:
+        """Return the filesystem boundary for safe Python import lookup."""
+        caller_dir = Path(file_path).resolve().parent
+        if self._repo_root is not None:
+            return self._repo_root
+        for candidate in (caller_dir, *caller_dir.parents):
+            if (candidate / ".git").exists() or (candidate / ".svn").exists():
+                return candidate
+        return caller_dir
+
+    @staticmethod
+    def _path_is_within(path: Path, boundary: Path) -> bool:
+        """Return whether *path* is *boundary* or one of its descendants."""
+        try:
+            path.relative_to(boundary)
+        except ValueError:
+            return False
+        return True
+
+    def _resolve_python_module_in_repo(
+        self, module: str, file_path: str,
+    ) -> Optional[str]:
+        """Resolve a Python module without traversing above the repository."""
+        caller_dir = Path(file_path).resolve().parent
+        boundary = self._python_repo_boundary(file_path)
+        leading_dots = len(module) - len(module.lstrip("."))
+        module_name = module[leading_dots:]
+        relative = Path(*module_name.split(".")) if module_name else Path()
+
+        search_roots: list[Path] = []
+        if leading_dots:
+            base = caller_dir
+            for _ in range(leading_dots - 1):
+                if base == boundary:
+                    return None
+                base = base.parent
+            search_roots.append(base)
+        else:
+            current = caller_dir
+            while self._path_is_within(current, boundary):
+                search_roots.append(current)
+                if current == boundary:
+                    break
+                current = current.parent
+
+        for root in search_roots:
+            base = root / relative
+            candidates = (
+                base.with_suffix(".py") if module_name else base / "__init__.py",
+                base / "__init__.py",
+            )
+            for candidate in candidates:
+                try:
+                    resolved = candidate.resolve()
+                except (OSError, ValueError):
+                    continue
+                if not self._path_is_within(resolved, boundary):
+                    continue
+                if resolved.is_file():
+                    return str(resolved)
+        return None
+
     def _collect_js_exported_local_names(
         self, node, defined_names: set[str],
     ) -> None:
@@ -6138,7 +6349,18 @@ class CodeParser:
         language: str,
     ) -> Optional[str]:
         """Resolve an imported symbol to its defining qualified name when possible."""
-        resolved = self._resolve_module_to_file(module, file_path, language)
+        module_path = Path(module)
+        if language == "python" and module_path.is_absolute():
+            try:
+                candidate = module_path.resolve()
+            except (OSError, ValueError):
+                return None
+            boundary = self._python_repo_boundary(file_path)
+            if not self._path_is_within(candidate, boundary) or not candidate.is_file():
+                return None
+            resolved = str(candidate)
+        else:
+            resolved = self._resolve_module_to_file(module, file_path, language)
         if not resolved:
             return None
 
