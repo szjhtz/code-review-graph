@@ -413,8 +413,8 @@ class TestPidAliveWindows:
 
         kernel32 = _FakeKernel32(handle=1234, wait_result=0x102)
         assert _pid_alive_windows(4242, kernel32) is True
-        # PROCESS_QUERY_LIMITED_INFORMATION, no inherit, the pid
-        assert kernel32.open_calls == [(0x1000, False, 4242)]
+        # PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, no inherit, the pid
+        assert kernel32.open_calls == [(0x1000 | 0x00100000, False, 4242)]
         assert kernel32.wait_calls == [(1234, 0)]
         # The handle must always be closed
         assert kernel32.closed == [1234]
@@ -426,6 +426,43 @@ class TestPidAliveWindows:
         kernel32 = _FakeKernel32(handle=1234, wait_result=0x0)
         assert _pid_alive_windows(4242, kernel32) is False
         assert kernel32.closed == [1234]
+
+    def test_alive_when_wait_fails(self, caplog):
+        """WAIT_FAILED cannot prove death, and records the Win32 error."""
+        from code_review_graph.daemon import _pid_alive_windows
+
+        kernel32 = _FakeKernel32(handle=1234, wait_result=0xFFFFFFFF, last_error=6)
+        with caplog.at_level("DEBUG", logger="code_review_graph.daemon"):
+            assert _pid_alive_windows(4242, kernel32) is True
+        assert "WaitForSingleObject on PID 4242 failed (error 6)" in caplog.text
+        assert kernel32.closed == [1234]
+
+    def test_pid_alive_declares_win32_function_prototypes(self, monkeypatch):
+        """ctypes uses pointer-width HANDLEs and unsigned DWORD wait results."""
+        import ctypes
+        from ctypes import wintypes
+
+        from code_review_graph.daemon import pid_alive
+
+        kernel32 = MagicMock()
+        kernel32.OpenProcess.return_value = 1234
+        kernel32.WaitForSingleObject.return_value = 0x102
+        kernel32.CloseHandle.return_value = 1
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.setattr(ctypes, "WinDLL", MagicMock(return_value=kernel32), raising=False)
+        monkeypatch.setattr(ctypes, "get_last_error", MagicMock(return_value=0), raising=False)
+
+        assert pid_alive(4242) is True
+        assert kernel32.OpenProcess.argtypes == (
+            wintypes.DWORD,
+            wintypes.BOOL,
+            wintypes.DWORD,
+        )
+        assert kernel32.OpenProcess.restype is wintypes.HANDLE
+        assert kernel32.WaitForSingleObject.argtypes == (wintypes.HANDLE, wintypes.DWORD)
+        assert kernel32.WaitForSingleObject.restype is wintypes.DWORD
+        assert kernel32.CloseHandle.argtypes == (wintypes.HANDLE,)
+        assert kernel32.CloseHandle.restype is wintypes.BOOL
 
     def test_alive_on_access_denied(self):
         """NULL handle + ERROR_ACCESS_DENIED (5) means alive (other user)."""
